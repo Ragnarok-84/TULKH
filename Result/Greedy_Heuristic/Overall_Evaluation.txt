@@ -1,0 +1,3 @@
+Thuật toán: GREEDY + HEURISTIC
+Số bài giải thành công: 60
+Thời gian trung bình: 7.180825 giây
