@@ -1,0 +1,8 @@
+=========================================
+      BÁO CÁO TỔNG HỢP CP-SAT
+=========================================
+Tổng số bài đã giải thành công: 60 bài
+Số bài đạt đỉnh OPTIMUM: 14 bài
+Số bài chạm FEASIBLE (hết giờ): 24 bài
+Thời gian chạy trung bình: 90850.7754 ms
+=========================================
