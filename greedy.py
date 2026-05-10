@@ -29,7 +29,7 @@ def write_result(filename, assignments, obj_val, exec_time):
         f.write(f"Thời gian: {exec_time:.6f} giây\n")
         f.write(f"Trạng thái: GREEDY_DONE\n")
 
-print("Bắt đầu chạy Thuật toán Tham lam (Greedy + Heuristic)...")
+print("Bắt đầu chạy Thuật toán Tham lam (Smart Greedy + Heuristics)...")
 runs = 0
 total_time = 0
 times_by_size = defaultdict(list)
@@ -53,15 +53,21 @@ for file in os.listdir(INPUT_DIR):
         for m in caps:
             teachers_for_m[m].append(t)
             
+    # --- ĐIỂM NÂNG CẤP (TEACHER HEURISTIC) ---
+    # Trong cùng 1 môn, ưu tiên dùng Giáo viên biết dạy ÍT MÔN trước.
+    # "Để dành" các Super Teacher (dạy được nhiều môn) cho các ca khó về sau.
+    for m in teachers_for_m:
+        teachers_for_m[m].sort(key=lambda t: len(teacher_caps[t]))
+            
     # 2. Tạo danh sách Nhiệm vụ (Task)
     tasks = []
     for n, reqs in class_reqs.items():
         for m in reqs:
             tasks.append((n, m))
             
-    # 3. HEURISTIC: Trái tim của thuật toán
-    # Ưu tiên 1: Môn càng ít GV dạy càng xếp trước (len tăng dần)
-    # Ưu tiên 2: Môn số tiết d(m) càng dài càng xếp trước (-d[m] giảm dần)
+    # 3. TASK HEURISTIC: Trái tim của thuật toán
+    # Ưu tiên 1: Môn càng ít GV dạy càng xếp trước (Trị dứt điểm bẫy Adversarial)
+    # Ưu tiên 2: Môn số tiết d(m) càng dài càng xếp trước (Nhét cục đá to vào lọ trước)
     tasks.sort(key=lambda x: (len(teachers_for_m[x[1]]), -d[x[1]]))
     
     # 4. Khởi tạo Lịch biểu (False là Rảnh, True là Bận)
@@ -74,6 +80,7 @@ for file in os.listdir(INPUT_DIR):
         duration = d[m]
         assigned = False
         
+        # Vòng lặp này giờ đây sẽ bốc "Niche Teacher" trước nhờ lệnh sort ở trên
         for t in teachers_for_m[m]:
             if assigned: break
             
@@ -112,7 +119,7 @@ for file in os.listdir(INPUT_DIR):
 
 # Báo cáo tổng kết
 with open(os.path.join(RESULT_DIR, "Overall_Evaluation.txt"), 'w', encoding='utf-8') as f:
-    f.write(f"Thuật toán: GREEDY + HEURISTIC\n")
+    f.write(f"Thuật toán: SMART GREEDY + DOUBLE HEURISTICS\n")
     f.write(f"Số bài giải thành công: {runs}\n")
     f.write(f"Thời gian trung bình: {total_time/runs if runs else 0:.6f} giây\n")
 

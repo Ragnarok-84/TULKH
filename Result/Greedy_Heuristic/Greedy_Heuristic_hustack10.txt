@@ -12,5 +12,5 @@
 4 1 5 1
 5 1 11 1
 Điểm tối ưu: 12
-Thời gian: 0.000283 giây
+Thời gian: 0.000304 giây
 Trạng thái: GREEDY_DONE

@@ -1,3 +1,0 @@
-Số bài giải thành công: 25
-Số bài đạt OPTIMUM: 7/25
-Thời gian trung bình: 82247.7378 ms

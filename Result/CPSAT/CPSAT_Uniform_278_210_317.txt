@@ -1,4 +1,0 @@
-0
-Điểm tối ưu: 0
-Thời gian: 97853.8716 ms
-Trạng thái: UNKNOWN
