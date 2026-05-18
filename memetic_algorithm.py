@@ -1,19 +1,14 @@
 """
-Memetic Algorithm v2 — nhúng heuristic của Greedy vào khởi tạo
+Memetic Algorithm v3 — O(d) conflict check với indexed schedule
 ================================================================
-Điểm khác biệt so với v1:
-  1. Khởi tạo dùng Greedy-guided (task + teacher heuristic như greedy.py)
-  2. Local Search dùng Ejection Chain: đẩy lớp-môn chặn đường sang slot khác
-     thay vì chỉ "thêm vào chỗ trống"
-  3. Đa dạng hoá quần thể bằng perturbation mạnh hơn trước local search
-
-Cấu trúc thời gian:
-  5 ngày × 2 buổi × 6 tiết = 60 slot (1-based)
-  Môn phải nằm trọn trong 1 buổi.
+Cải tiến tốc độ so với v2:
+  - can_assign: O(|chrom|) → O(duration) ≤ O(6)  ← thay đổi lớn nhất
+  - Dùng class Schedule (2 mảng bool 60 slot) thay vì duyệt dict
+  - Crossover/LocalSearch đều thao tác trên Schedule object
+  - Pop_size và Generations tự động scale theo kích thước bài toán
 """
 
 import random
-import copy
 import sys
 import os
 import re
@@ -22,6 +17,7 @@ from collections import defaultdict
 
 DAYS, SES, PER = 5, 2, 6
 TOTAL = DAYS * SES * PER  # 60
+
 
 # ─── Tiện ích slot ────────────────────────────────────────────────────────────
 
@@ -33,15 +29,15 @@ def valid_start_slots(duration):
                 slots.append(day * SES * PER + ses * PER + p + 1)  # 1-based
     return slots
 
-def overlap(s1, d1, s2, d2):
-    return s1 < s2 + d2 and s2 < s1 + d1
 
 # ─── Đọc input ────────────────────────────────────────────────────────────────
 
 def parse_input(text):
     tokens = text.split()
     idx = 0
-    def nx(): nonlocal idx; v = int(tokens[idx]); idx += 1; return v
+    def nx():
+        nonlocal idx
+        v = int(tokens[idx]); idx += 1; return v
 
     T, N, M = nx(), nx(), nx()
     class_courses = []
@@ -66,116 +62,175 @@ def parse_input(text):
     return T, N, M, class_courses, teacher_courses, durations
 
 
-# ─── Chromosome ───────────────────────────────────────────────────────────────
-# chrom: dict { (class_id, course_id) → (teacher_id, start_slot) }  1-based
+# ─── Schedule: bảng tra cứu O(1) per slot ────────────────────────────────────
+
+class Schedule:
+    """
+    Giữ 2 mảng bool[60]:
+      class_busy[cls][slot]    = True nếu lớp cls bận slot đó
+      teacher_busy[tch][slot]  = True nếu GV tch bận slot đó
+    Tất cả index 0-based nội bộ, slot 1-based từ ngoài vào.
+    """
+    __slots__ = ('class_busy', 'teacher_busy', 'assignments', 'N', 'T')
+
+    def __init__(self, N, T):
+        self.N = N
+        self.T = T
+        # dùng bytearray thay list[bool] → nhỏ hơn và copy nhanh hơn
+        self.class_busy   = [bytearray(TOTAL) for _ in range(N + 1)]
+        self.teacher_busy = [bytearray(TOTAL) for _ in range(T + 1)]
+        # assignments[(cls, crs)] = (tch, ss)
+        self.assignments  = {}
+
+    def copy(self):
+        s = Schedule.__new__(Schedule)
+        s.N = self.N
+        s.T = self.T
+        s.class_busy   = [bytearray(b) for b in self.class_busy]
+        s.teacher_busy = [bytearray(b) for b in self.teacher_busy]
+        s.assignments  = dict(self.assignments)
+        return s
+
+    def can_place(self, cls, crs, tch, ss, dur):
+        """O(dur) ≤ O(6)"""
+        cb = self.class_busy[cls]
+        tb = self.teacher_busy[tch]
+        for k in range(dur):
+            slot = ss - 1 + k   # 0-based index
+            if cb[slot] or tb[slot]:
+                return False
+        return True
+
+    def place(self, cls, crs, tch, ss, dur):
+        cb = self.class_busy[cls]
+        tb = self.teacher_busy[tch]
+        for k in range(dur):
+            slot = ss - 1 + k
+            cb[slot] = 1
+            tb[slot] = 1
+        self.assignments[(cls, crs)] = (tch, ss)
+
+    def remove(self, cls, crs, tch, ss, dur):
+        cb = self.class_busy[cls]
+        tb = self.teacher_busy[tch]
+        for k in range(dur):
+            slot = ss - 1 + k
+            cb[slot] = 0
+            tb[slot] = 0
+        del self.assignments[(cls, crs)]
+
+    def __len__(self):
+        return len(self.assignments)
+
+
+# ─── Solver ───────────────────────────────────────────────────────────────────
 
 class MemeticSolver:
     def __init__(self, T, N, M, class_courses, teacher_courses, durations,
-                 pop_size=50, generations=150, ls_iters=30,
-                 mutation_rate=0.2, tournament_k=3, seed=42, verbose=True):
+                 pop_size=None, generations=None, ls_iters=20,
+                 mutation_rate=0.25, tournament_k=3, seed=42,
+                 time_limit=None, verbose=True):
         self.T = T; self.N = N; self.M = M
-        self.class_courses = class_courses
+        self.class_courses   = class_courses
         self.teacher_courses = teacher_courses
-        self.durations = durations
-        self.pop_size = pop_size
-        self.generations = generations
-        self.ls_iters = ls_iters
-        self.mutation_rate = mutation_rate
-        self.tournament_k = tournament_k
-        self.verbose = verbose
+        self.durations       = durations
+        self.ls_iters        = ls_iters
+        self.mutation_rate   = mutation_rate
+        self.tournament_k    = tournament_k
+        self.verbose         = verbose
+        self.time_limit      = time_limit   # giây, None = không giới hạn
+        self._start_time     = None
         random.seed(seed)
 
-        # Precompute valid slots cho mỗi môn
+        # Precompute valid slots
         self.valid_slots = {m: valid_start_slots(d) for m, d in durations.items()}
 
-        # course → list of teacher_id (1-based)
+        # course → list teacher (1-based)
         self.course_teachers = defaultdict(list)
         for t_idx, cs in enumerate(teacher_courses):
             for c in cs:
                 self.course_teachers[c].append(t_idx + 1)
 
         # Tất cả lớp-môn
-        self.all_cc = [(cls + 1, crs)
-                       for cls, courses in enumerate(class_courses)
-                       for crs in courses]
+        self.all_cc = [
+            (cls + 1, crs)
+            for cls, courses in enumerate(class_courses)
+            for crs in courses
+        ]
+        total = len(self.all_cc)
 
-        # ── Heuristic order (copy từ greedy.py) ──────────────────────────────
-        # Ưu tiên 1: môn ít GV dạy lên trước
-        # Ưu tiên 2: trong cùng nhóm đó, môn tiết dài lên trước
+        # Auto scale tham số theo kích thước
+        if pop_size is None:
+            if total <= 500:    pop_size = 40
+            elif total <= 2000: pop_size = 20
+            elif total <= 5000: pop_size = 10
+            else:               pop_size = 5   # bài rất lớn: chủ yếu dựa vào LS
+        if generations is None:
+            if total <= 500:    generations = 100
+            elif total <= 2000: generations = 50
+            elif total <= 5000: generations = 20
+            else:               generations = 10
+
+        self.pop_size   = pop_size
+        self.generations = generations
+
+        # Heuristic order: môn ít GV trước, tiết dài trước
         self.heuristic_order = sorted(
             self.all_cc,
             key=lambda x: (len(self.course_teachers[x[1]]), -durations[x[1]])
         )
 
-        # Teacher order cho mỗi môn: GV biết ít môn nhất lên trước
-        self.teacher_order = {}
-        for crs, teachers in self.course_teachers.items():
-            self.teacher_order[crs] = sorted(
-                teachers,
-                key=lambda t: len(teacher_courses[t - 1])
-            )
+        # Teacher order cho mỗi môn: GV ít môn nhất trước
+        self.teacher_order = {
+            crs: sorted(ts, key=lambda t: len(teacher_courses[t - 1]))
+            for crs, ts in self.course_teachers.items()
+        }
 
-    # ── Check xung đột ────────────────────────────────────────────────────────
+    # ── Tạo Schedule rỗng ────────────────────────────────────────────────────
 
-    def can_assign(self, chrom, cls, crs, tch, ss, exclude_key=None):
-        d = self.durations[crs]
-        for (c2, r2), (t2, s2) in chrom.items():
-            if (c2, r2) == exclude_key:
-                continue
-            if c2 == cls or t2 == tch:
-                if overlap(ss, d, s2, self.durations[r2]):
-                    return False
-        return True
+    def _empty_schedule(self):
+        return Schedule(self.N, self.T)
 
-    # ── Khởi tạo cá thể ───────────────────────────────────────────────────────
+    # ── Khởi tạo cá thể ──────────────────────────────────────────────────────
 
-    def make_individual(self, use_heuristic=True, noise=0.0):
-        """
-        noise=0.0 → thuần greedy order
-        noise>0   → shuffle một phần để đa dạng hoá quần thể
-        """
-        chrom = {}
-        order = list(self.heuristic_order) if use_heuristic else list(self.all_cc)
+    def make_individual(self, noise=0.0):
+        sched = self._empty_schedule()
+        order = list(self.heuristic_order)
 
         if noise > 0:
-            # Xáo trộn một phần: giữ nguyên top (1-noise) đầu, random phần còn lại
             split = int(len(order) * (1 - noise))
-            tail = order[split:]
+            tail  = order[split:]
             random.shuffle(tail)
             order = order[:split] + tail
 
         for (cls, crs) in order:
             teachers = self.teacher_order.get(crs, [])
-            slots = self.valid_slots.get(crs, [])
+            slots    = self.valid_slots.get(crs, [])
+            dur      = self.durations[crs]
             if not teachers or not slots:
                 continue
 
             if noise > 0:
-                teachers = list(teachers)
-                random.shuffle(teachers)
-                slots = list(slots)
-                random.shuffle(slots)
+                teachers = list(teachers); random.shuffle(teachers)
+                slots    = list(slots);    random.shuffle(slots)
 
-            placed = False
             for t in teachers:
-                if placed: break
+                placed = False
                 for s in slots:
-                    if self.can_assign(chrom, cls, crs, t, s):
-                        chrom[(cls, crs)] = (t, s)
+                    if sched.can_place(cls, crs, t, s, dur):
+                        sched.place(cls, crs, t, s, dur)
                         placed = True
                         break
-        return chrom
+                if placed:
+                    break
 
-    # ── Local Search (Ejection + Fill) ────────────────────────────────────────
+        return sched
 
-    def local_search(self, chrom):
-        """
-        Phase A — Fill: thêm lớp-môn chưa xếp (dùng heuristic order)
-        Phase B — Eject & retry: với lớp-môn chưa xếp, thử "đẩy" 1 lớp-môn
-                  đang chặn sang slot khác để nhường chỗ
-        """
-        chrom = dict(chrom)
-        assigned = set(chrom.keys())
+    # ── Local Search ─────────────────────────────────────────────────────────
+
+    def local_search(self, sched):
+        sched = sched.copy()
+        assigned = set(sched.assignments.keys())
 
         for _ in range(self.ls_iters):
             unassigned = [cc for cc in self.heuristic_order if cc not in assigned]
@@ -186,11 +241,12 @@ class MemeticSolver:
             # Phase A: Fill
             for (cls, crs) in unassigned:
                 teachers = self.teacher_order.get(crs, [])
-                slots = self.valid_slots.get(crs, [])
+                slots    = self.valid_slots.get(crs, [])
+                dur      = self.durations[crs]
                 for t in teachers:
                     for s in slots:
-                        if self.can_assign(chrom, cls, crs, t, s):
-                            chrom[(cls, crs)] = (t, s)
+                        if sched.can_place(cls, crs, t, s, dur):
+                            sched.place(cls, crs, t, s, dur)
                             assigned.add((cls, crs))
                             improved = True
                             break
@@ -198,155 +254,201 @@ class MemeticSolver:
                         continue
                     break
 
-            # Phase B: Ejection Chain (thử đẩy kẻ cản đường)
-            still_unassigned = [cc for cc in self.heuristic_order if cc not in assigned]
-            for (cls, crs) in still_unassigned[:10]:  # giới hạn để không chậm
-                d = self.durations[crs]
+            # Phase B: Ejection — thử đẩy đúng 1 kẻ cản sang slot khác
+            still = [cc for cc in self.heuristic_order if cc not in assigned]
+            for (cls, crs) in still[:15]:
+                dur   = self.durations[crs]
                 teachers = self.teacher_order.get(crs, [])
-                slots = self.valid_slots.get(crs, [])
+                slots    = self.valid_slots.get(crs, [])
 
                 for t in teachers:
+                    ejected = False
                     for s in slots:
-                        # Tìm kẻ cản
-                        blockers = [
-                            (c2, r2) for (c2, r2), (t2, s2) in chrom.items()
-                            if (c2 == cls or t2 == t) and overlap(s, d, s2, self.durations[r2])
-                        ]
+                        if sched.can_place(cls, crs, t, s, dur):
+                            # không cần eject, Fill đã bỏ sót → thêm thẳng
+                            sched.place(cls, crs, t, s, dur)
+                            assigned.add((cls, crs))
+                            improved = True
+                            ejected = True
+                            break
+
+                        # Tìm đúng 1 kẻ cản (class conflict hoặc teacher conflict)
+                        blockers = set()
+                        cb = sched.class_busy[cls]
+                        tb = sched.teacher_busy[t]
+                        for k in range(dur):
+                            slot_idx = s - 1 + k
+                            if cb[slot_idx] or tb[slot_idx]:
+                                # Tìm assignment nào chiếm slot này
+                                for key, (bt, bs) in sched.assignments.items():
+                                    bc, br = key
+                                    bd = self.durations[br]
+                                    if (bc == cls or bt == t) and bs - 1 <= slot_idx < bs - 1 + bd:
+                                        blockers.add(key)
+                                break  # chỉ cần biết có blocker
+
                         if len(blockers) != 1:
                             continue
-                        blocker = blockers[0]
-                        bt, bs = chrom[blocker]
-                        bc, br = blocker
 
-                        # Thử dời blocker sang slot khác
-                        del chrom[blocker]
+                        blocker = next(iter(blockers))
+                        bc, br  = blocker
+                        bt, bs  = sched.assignments[blocker]
+                        bd      = self.durations[br]
+
+                        # Thử dời blocker
+                        sched.remove(bc, br, bt, bs, bd)
                         moved = False
                         for new_s in self.valid_slots.get(br, []):
-                            if new_s == bs:
-                                continue
-                            if self.can_assign(chrom, bc, br, bt, new_s):
-                                chrom[blocker] = (bt, new_s)
+                            if new_s == bs: continue
+                            if sched.can_place(bc, br, bt, new_s, bd):
+                                sched.place(bc, br, bt, new_s, bd)
                                 moved = True
                                 break
 
-                        if moved and self.can_assign(chrom, cls, crs, t, s):
-                            chrom[(cls, crs)] = (t, s)
+                        if moved and sched.can_place(cls, crs, t, s, dur):
+                            sched.place(cls, crs, t, s, dur)
                             assigned.add((cls, crs))
                             improved = True
+                            ejected  = True
                             break
                         else:
-                            chrom[blocker] = (bt, bs)  # hoàn lại
-                    else:
-                        continue
-                    break
+                            # Hoàn lại blocker
+                            if moved:
+                                # blocker đã được dời nhưng slot mới không giúp được → restore
+                                new_t_val = sched.assignments.get(blocker)
+                                if new_t_val:
+                                    sched.remove(bc, br, bt, new_t_val[1], bd)
+                            sched.place(bc, br, bt, bs, bd)
+
+                    if ejected:
+                        break
 
             if not improved:
                 break
 
-        return chrom
+        return sched
 
-    # ── Crossover ─────────────────────────────────────────────────────────────
+    # ── Crossover ────────────────────────────────────────────────────────────
 
     def crossover(self, p1, p2):
-        child = {}
-        # Lấy từ p1 theo heuristic order (ưu tiên lớp-môn khó trước)
+        child = self._empty_schedule()
         for (cls, crs) in self.heuristic_order:
             key = (cls, crs)
-            src = p1 if key in p1 else (p2 if key in p2 else None)
-            if src is None:
-                continue
-            t, s = src[key]
-            if self.can_assign(child, cls, crs, t, s):
-                child[key] = (t, s)
+            # Ưu tiên p1, fallback p2
+            src = p1 if key in p1.assignments else (p2 if key in p2.assignments else None)
+            if src is None: continue
+            tch, ss = src.assignments[key]
+            dur = self.durations[crs]
+            if child.can_place(cls, crs, tch, ss, dur):
+                child.place(cls, crs, tch, ss, dur)
         # Bổ sung từ p2
-        for key, (t, s) in p2.items():
-            if key not in child:
-                cls, crs = key
-                if self.can_assign(child, cls, crs, t, s):
-                    child[key] = (t, s)
+        for (cls, crs), (tch, ss) in p2.assignments.items():
+            if (cls, crs) not in child.assignments:
+                dur = self.durations[crs]
+                if child.can_place(cls, crs, tch, ss, dur):
+                    child.place(cls, crs, tch, ss, dur)
         return child
 
-    # ── Mutation ──────────────────────────────────────────────────────────────
+    # ── Mutation ─────────────────────────────────────────────────────────────
 
-    def mutate(self, chrom):
-        chrom = dict(chrom)
-        if not chrom:
-            return chrom
-        # Xoá ngẫu nhiên 1-3 lớp-môn rồi để local search lấp lại
-        n_remove = random.randint(1, min(3, len(chrom)))
-        keys = random.sample(list(chrom.keys()), n_remove)
-        for k in keys:
-            del chrom[k]
-        return chrom
+    def mutate(self, sched):
+        sched = sched.copy()
+        if not sched.assignments:
+            return sched
+        n_remove = random.randint(1, min(5, len(sched.assignments)))
+        keys = random.sample(list(sched.assignments.keys()), n_remove)
+        for (cls, crs) in keys:
+            tch, ss = sched.assignments[(cls, crs)]
+            sched.remove(cls, crs, tch, ss, self.durations[crs])
+        return sched
 
-    # ── Tournament selection ───────────────────────────────────────────────────
+    # ── Tournament select ─────────────────────────────────────────────────────
 
     def select(self, pop):
         cands = random.sample(pop, min(self.tournament_k, len(pop)))
         return max(cands, key=len)
 
-    # ── Main loop ─────────────────────────────────────────────────────────────
+    # ── Timeout check ─────────────────────────────────────────────────────────
+
+    def _timed_out(self):
+        if self.time_limit is None:
+            return False
+        return time.perf_counter() - self._start_time >= self.time_limit
+
+    # ── Main loop ────────────────────────────────────────────────────────────
 
     def solve(self):
+        self._start_time = time.perf_counter()
         total = len(self.all_cc)
-        log = self._log
+        log   = self._log
 
         log(f"T={self.T} GV | N={self.N} lớp | M={self.M} môn | {total} lớp-môn")
-        log(f"Quần thể={self.pop_size} | Thế hệ={self.generations}")
-        log("Khởi tạo quần thể (greedy-guided)...")
+        log(f"pop={self.pop_size} | gen={self.generations} | ls_iters={self.ls_iters}")
+        log("Khởi tạo quần thể...")
 
-        # Khởi tạo: 1 cá thể thuần greedy + phần còn lại có noise dần tăng
         pop = []
-        pop.append(self.local_search(self.make_individual(use_heuristic=True, noise=0.0)))
+        # Cá thể 0: thuần greedy không noise
+        pop.append(self.local_search(self.make_individual(noise=0.0)))
         for i in range(1, self.pop_size):
-            noise = 0.1 + 0.5 * (i / self.pop_size)  # noise từ 0.1 → 0.6
-            ind = self.make_individual(use_heuristic=True, noise=noise)
-            ind = self.local_search(ind)
-            pop.append(ind)
+            if self._timed_out():
+                log("  Timeout khi khởi tạo, dùng quần thể hiện tại")
+                break
+            noise = 0.1 + 0.5 * (i / self.pop_size)
+            ind   = self.make_individual(noise=noise)
+            pop.append(self.local_search(ind))
 
-        best = max(pop, key=len)
-        history = [len(best)]
+        best     = max(pop, key=len)
+        history  = [len(best)]
+        stagnant = 0
+
         log(f"Gen 0: best={len(best)}/{total} | avg={sum(len(x) for x in pop)/len(pop):.1f}")
 
-        stagnant = 0
         for gen in range(1, self.generations + 1):
+            if self._timed_out():
+                log(f"  Timeout tại gen {gen}, dừng sớm")
+                break
+
             sorted_pop = sorted(pop, key=len, reverse=True)
-            new_pop = sorted_pop[:2]  # elitism
+            new_pop    = sorted_pop[:2]  # elitism top-2
 
             while len(new_pop) < self.pop_size:
-                p1 = self.select(pop)
-                p2 = self.select(pop)
+                if self._timed_out():
+                    break
+                p1    = self.select(pop)
+                p2    = self.select(pop)
                 child = self.crossover(p1, p2)
                 if random.random() < self.mutation_rate:
                     child = self.mutate(child)
                 child = self.local_search(child)
                 new_pop.append(child)
 
-            pop = new_pop
+            pop      = new_pop
             cur_best = max(pop, key=len)
             if len(cur_best) > len(best):
-                best = cur_best
+                best     = cur_best
                 stagnant = 0
             else:
                 stagnant += 1
 
             history.append(len(best))
 
-            if gen % 20 == 0 or gen == self.generations:
+            if gen % 5 == 0 or gen == self.generations:
                 avg = sum(len(x) for x in pop) / len(pop)
-                log(f"Gen {gen:3d}: best={len(best)}/{total} | avg={avg:.1f} | stagnant={stagnant}")
+                elapsed = time.perf_counter() - self._start_time
+                log(f"Gen {gen:3d}: best={len(best)}/{total} | avg={avg:.1f} | "
+                    f"stagnant={stagnant} | {elapsed:.1f}s")
 
-            # Restart một phần nếu bị kẹt quá lâu
-            if stagnant >= 30:
-                log(f"  → Restart 50% quần thể (stagnant={stagnant})")
+            # Partial restart khi bị kẹt
+            if stagnant >= 20:
+                log(f"  → Restart 50% quần thể")
                 sorted_pop = sorted(pop, key=len, reverse=True)
-                keep = sorted_pop[:self.pop_size // 2]
+                keep  = sorted_pop[:self.pop_size // 2]
                 fresh = []
                 for i in range(self.pop_size - len(keep)):
+                    if self._timed_out(): break
                     noise = 0.3 + 0.4 * random.random()
-                    ind = self.make_individual(use_heuristic=True, noise=noise)
-                    fresh.append(self.local_search(ind))
-                pop = keep + fresh
+                    fresh.append(self.local_search(self.make_individual(noise=noise)))
+                pop      = keep + fresh
                 stagnant = 0
 
         return best, history
@@ -355,31 +457,30 @@ class MemeticSolver:
         if self.verbose:
             print(msg, flush=True)
 
-    # ── Output ────────────────────────────────────────────────────────────────
-
-    def format_output(self, chrom):
-        lines = [str(len(chrom))]
-        for (cls, crs), (tch, ss) in sorted(chrom.items()):
+    def format_output(self, sched):
+        lines = [str(len(sched))]
+        for (cls, crs), (tch, ss) in sorted(sched.assignments.items()):
             lines.append(f"{cls} {crs} {ss} {tch}")
         return "\n".join(lines)
 
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-INPUT_DIR  = "Datasets"
+INPUT_DIR   = "Datasets"
 SOLVER_NAME = "Memetic_Algorithm"
 RESULT_DIR  = os.path.join("Result", SOLVER_NAME)
 
-# Tham số MA — chỉnh tại đây
-POP_SIZE       = 50
-GENERATIONS    = 150
-LS_ITERS       = 25
-MUTATION_RATE  = 0.25
-TOURNAMENT_K   = 3
-SEED           = 42
+# Tham số — None = tự động scale theo kích thước bài
+POP_SIZE      = None
+GENERATIONS   = None
+LS_ITERS      = 20
+MUTATION_RATE = 0.25
+TOURNAMENT_K  = 3
+SEED          = 42
+TIME_LIMIT    = None   # giây/bài, None = không giới hạn
 
 
-# ─── Ghi kết quả (cùng định dạng với Greedy và CP-SAT) ───────────────────────
+# ─── Ghi kết quả ─────────────────────────────────────────────────────────────
 
 def write_result(filename, assignments, obj_val, exec_time, status="DONE"):
     with open(filename, 'w', encoding='utf-8') as f:
@@ -391,10 +492,10 @@ def write_result(filename, assignments, obj_val, exec_time, status="DONE"):
         f.write(f"Trạng thái: {status}\n")
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
+# ─── Main ────────────────────────────────────────────────────────────────────
 
 def main():
-    # Chế độ đơn lẻ: python ma_v2.py input.txt
+    # ── Chế độ đơn lẻ ────────────────────────────────────────────────────────
     if len(sys.argv) > 1:
         input_file = sys.argv[1]
         with open(input_file, encoding='utf-8') as f:
@@ -404,12 +505,12 @@ def main():
         total = sum(len(c) for c in class_courses)
         print(f"T={T} GV | N={N} lớp | M={M} môn | {total} lớp-môn")
 
-        start = time.perf_counter()
+        start  = time.perf_counter()
         solver = MemeticSolver(
             T, N, M, class_courses, teacher_courses, durations,
             pop_size=POP_SIZE, generations=GENERATIONS, ls_iters=LS_ITERS,
             mutation_rate=MUTATION_RATE, tournament_k=TOURNAMENT_K,
-            seed=SEED, verbose=True,
+            seed=SEED, time_limit=TIME_LIMIT, verbose=True,
         )
         best, _ = solver.solve()
         exec_time = time.perf_counter() - start
@@ -419,77 +520,123 @@ def main():
         print(output)
         print(f"Thời gian: {exec_time:.6f} giây")
 
-        # Lưu file kết quả bên cạnh script
         os.makedirs(RESULT_DIR, exist_ok=True)
         basename = os.path.splitext(os.path.basename(input_file))[0]
         out_file = os.path.join(RESULT_DIR, f"{SOLVER_NAME}_{basename}.txt")
         assignments = [
             (cls, crs, ss, tch)
-            for (cls, crs), (tch, ss) in sorted(best.items())
+            for (cls, crs), (tch, ss) in sorted(best.assignments.items())
         ]
         write_result(out_file, assignments, len(best), exec_time)
         print(f"✓ Kết quả lưu: {out_file}")
         return
 
-    # Chế độ batch: duyệt toàn bộ Datasets/ như Greedy và CP-SAT
+    # ── Chế độ batch ─────────────────────────────────────────────────────────
     os.makedirs(RESULT_DIR, exist_ok=True)
     print(f"Bắt đầu chạy bộ giải {SOLVER_NAME}...")
 
-    runs = 0
-    total_time = 0.0
-    times_by_size = defaultdict(list)
+    # ── Thu thập tất cả .txt đệ quy trong INPUT_DIR ──────────────────────────
+    def sort_key(fname):
+        nums = re.findall(r'\d+', fname)
+        return [int(n) for n in nums] if nums else [0]
 
-    txt_files = sorted(f for f in os.listdir(INPUT_DIR) if f.endswith(".txt"))
-    if not txt_files:
+    all_files = []   # list of (subfolder_relative, filepath)
+    for root, dirs, files in os.walk(INPUT_DIR):
+        dirs.sort()  # duyệt subfolder theo thứ tự alphabet
+        txts = sorted([f for f in files if f.endswith(".txt")], key=sort_key)
+        for fname in txts:
+            rel_dir  = os.path.relpath(root, INPUT_DIR)   # vd: "Adversarial"
+            filepath = os.path.join(root, fname)
+            all_files.append((rel_dir, filepath))
+
+    if not all_files:
         print(f"Không tìm thấy file .txt trong '{INPUT_DIR}/'")
         return
 
-    for file in txt_files:
-        filepath = os.path.join(INPUT_DIR, file)
-        basename = os.path.splitext(file)[0]
-        nums = re.findall(r'\d+', basename)
-        size = int(nums[0]) if nums else 0
+    # Thống kê số file theo từng bộ
+    from collections import Counter
+    group_count = Counter(rel for rel, _ in all_files)
+    print(f"Tìm thấy {len(all_files)} file trong {len(group_count)} bộ dataset:")
+    for grp, cnt in sorted(group_count.items()):
+        print(f"  {grp}: {cnt} file")
+    print()
+
+    runs           = 0
+    total_time     = 0.0
+    # group_stats[subfolder] = {'runs':0, 'time':0.0}
+    group_stats    = {}
+    current_group  = None
+
+    for rel_dir, filepath in all_files:
+        basename = os.path.splitext(os.path.basename(filepath))[0]
+
+        # In header khi sang bộ mới
+        if rel_dir != current_group:
+            current_group = rel_dir
+            print(f"\n{'='*55}")
+            print(f"  BỘ: {rel_dir}")
+            print(f"{'='*55}", flush=True)
+            group_stats[rel_dir] = {'runs': 0, 'time': 0.0}
 
         with open(filepath, encoding='utf-8') as f:
             text = f.read()
 
         T, N, M, class_courses, teacher_courses, durations = parse_input(text)
         total_cc = sum(len(c) for c in class_courses)
-        print(f"Đang giải {basename} ({total_cc} lớp-môn)...", flush=True)
+        print(f"  Đang giải {basename} ({total_cc} lớp-môn)...", flush=True)
 
-        start = time.perf_counter()
+        start  = time.perf_counter()
         solver = MemeticSolver(
             T, N, M, class_courses, teacher_courses, durations,
             pop_size=POP_SIZE, generations=GENERATIONS, ls_iters=LS_ITERS,
             mutation_rate=MUTATION_RATE, tournament_k=TOURNAMENT_K,
-            seed=SEED, verbose=False,   # tắt log chi tiết khi batch
+            seed=SEED, time_limit=TIME_LIMIT, verbose=False,
         )
         best, _ = solver.solve()
         exec_time = time.perf_counter() - start
 
         assignments = [
             (cls, crs, ss, tch)
-            for (cls, crs), (tch, ss) in sorted(best.items())
+            for (cls, crs), (tch, ss) in sorted(best.assignments.items())
         ]
-        out_file = os.path.join(RESULT_DIR, f"{SOLVER_NAME}_{basename}.txt")
+
+        # Mirror cấu trúc thư mục: Result/Memetic_Algorithm/Adversarial/...
+        out_dir  = os.path.join(RESULT_DIR, rel_dir)
+        os.makedirs(out_dir, exist_ok=True)
+        out_file = os.path.join(out_dir, f"{SOLVER_NAME}_{basename}.txt")
         write_result(out_file, assignments, len(best), exec_time)
 
-        print(f"  [{basename}] Xếp: {len(best)}/{total_cc} | {exec_time:.4f}s")
+        print(f"    [{basename}] Xếp: {len(best)}/{total_cc} | {exec_time:.2f}s")
 
-        runs += 1
-        total_time += exec_time
-        times_by_size[size].append(exec_time)
+        runs                          += 1
+        total_time                    += exec_time
+        group_stats[rel_dir]['runs']  += 1
+        group_stats[rel_dir]['time']  += exec_time
 
-    # Báo cáo tổng kết (cùng định dạng CP-SAT)
+    # ── Overall_Evaluation.txt: tổng kết theo từng bộ ─────────────────────
     overall_file = os.path.join(RESULT_DIR, "Overall_Evaluation.txt")
     with open(overall_file, 'w', encoding='utf-8') as f:
         f.write(f"Thuật toán: {SOLVER_NAME}\n")
-        f.write(f"Số bài giải thành công: {runs}\n")
-        f.write(f"Thời gian trung bình: {total_time / runs if runs else 0:.6f} giây\n")
+        f.write(f"Tổng file giải: {runs}\n")
+        f.write(f"Thời gian trung bình toàn bộ: "
+                f"{total_time / runs if runs else 0:.6f} giây\n\n")
+        f.write(f"{'Bộ dataset':<25} {'Số file':>8} {'TB (giây)':>12}\n")
+        f.write("-" * 48 + "\n")
+        for grp, stat in sorted(group_stats.items()):
+            avg = stat['time'] / stat['runs'] if stat['runs'] else 0
+            f.write(f"{grp:<25} {stat['runs']:>8} {avg:>12.4f}\n")
+        # Overall_Evaluation riêng cho từng bộ
+        for grp, stat in group_stats.items():
+            grp_file = os.path.join(RESULT_DIR, grp, "Overall_Evaluation.txt")
+            avg = stat['time'] / stat['runs'] if stat['runs'] else 0
+            with open(grp_file, 'w', encoding='utf-8') as gf:
+                gf.write(f"Bộ dataset: {grp}\n")
+                gf.write(f"Số bài giải: {stat['runs']}\n")
+                gf.write(f"Thời gian trung bình: {avg:.6f} giây\n")
 
-    print(f"\nHoàn thành! Đã giải {runs} file. "
-          f"Thời gian TB: {total_time / runs if runs else 0:.4f}s/bài")
-    print(f"Kết quả lưu tại: {RESULT_DIR}/")
+    print(f"\n{'='*55}")
+    print(f"Hoàn thành! {runs} file | TB: {total_time/runs if runs else 0:.2f}s/bài")
+    print(f"Kết quả: {RESULT_DIR}/")
 
 
 if __name__ == "__main__":
