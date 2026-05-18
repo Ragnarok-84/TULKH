@@ -160,16 +160,18 @@ class MemeticSolver:
         total = len(self.all_cc)
 
         # Auto scale tham số theo kích thước
+        # Pop nhỏ để init nhanh, dành phần lớn time_limit cho GA loop
         if pop_size is None:
-            if total <= 500:    pop_size = 40
-            elif total <= 2000: pop_size = 20
-            elif total <= 5000: pop_size = 10
-            else:               pop_size = 5   # bài rất lớn: chủ yếu dựa vào LS
+            if total <= 500:     pop_size = 20
+            elif total <= 2000:  pop_size = 10
+            elif total <= 5000:  pop_size = 6
+            else:                pop_size = 4
         if generations is None:
-            if total <= 500:    generations = 100
-            elif total <= 2000: generations = 50
-            elif total <= 5000: generations = 20
-            else:               generations = 10
+            # Số lớn vì timeout sẽ dừng sớm nếu hết time_limit
+            if total <= 500:     generations = 500
+            elif total <= 2000:  generations = 200
+            elif total <= 5000:  generations = 100
+            else:                generations = 50
 
         self.pop_size   = pop_size
         self.generations = generations
@@ -482,11 +484,11 @@ SEED          = 42
 # Tra theo tổng lớp-môn của file, lấy ngưỡng nhỏ nhất >= total_cc
 # None ở cuối = fallback không giới hạn
 TIME_LIMIT_BY_SIZE = [
-    (500,    60),    # <= 500  lớp-môn : 60s
-    (2000,   120),   # <= 2000 lớp-môn : 2 phút
-    (5000,   300),   # <= 5000 lớp-môn : 5 phút
-    (10000,  480),   # <= 10000         : 8 phút
-    (float('inf'), 600),  # > 10000     : 10 phút
+    (500,    300),   # <= 500   lớp-môn : 5 phút
+    (2000,   600),   # <= 2000  lớp-môn : 10 phút
+    (5000,   900),   # <= 5000  lớp-môn : 15 phút
+    (10000,  1200),  # <= 10000          : 20 phút
+    (float('inf'), 1800),  # > 10000     : 30 phút
 ]
 
 def get_time_limit(total_cc):
@@ -524,12 +526,13 @@ def main():
         total = sum(len(c) for c in class_courses)
         print(f"T={T} GV | N={N} lớp | M={M} môn | {total} lớp-môn")
 
+        tl     = get_time_limit(total)
         start  = time.perf_counter()
         solver = MemeticSolver(
             T, N, M, class_courses, teacher_courses, durations,
             pop_size=POP_SIZE, generations=GENERATIONS, ls_iters=LS_ITERS,
             mutation_rate=MUTATION_RATE, tournament_k=TOURNAMENT_K,
-            seed=SEED, time_limit=TIME_LIMIT, verbose=True,
+            seed=SEED, time_limit=tl, verbose=True,
         )
         best, _ = solver.solve()
         exec_time = time.perf_counter() - start
@@ -629,14 +632,50 @@ def main():
         out_file = os.path.join(out_dir, f"{SOLVER_NAME}_{basename}.txt")
         write_result(out_file, assignments, len(best), exec_time)
 
-        print(f"    [{basename}] Xếp: {len(best)}/{total_cc} | {exec_time:.2f}s")
+        rate = len(best) / total_cc * 100 if total_cc else 0
+        print(f"    [{basename}] Xếp: {len(best)}/{total_cc} ({rate:.1f}%) | {exec_time:.2f}s")
+
+        # In 5 dòng kết quả mẫu để kiểm tra nhanh
+        preview = assignments[:5]
+        print(f"    Preview (lớp môn kíp GV):")
+        for n, m, u, t in preview:
+            day    = (u - 1) // 12 + 1
+            ses    = ((u - 1) % 12) // 6 + 1
+            period = (u - 1) % 6 + 1
+            ses_str = "Sáng" if ses == 1 else "Chiều"
+            print(f"      Lớp {n:3d} | Môn {m:3d} | Ngày {day} {ses_str} tiết {period} | GV {t}")
+        if len(assignments) > 5:
+            print(f"      ... ({len(assignments)-5} dòng còn lại đã lưu vào file)")
 
         runs                          += 1
         total_time                    += exec_time
         group_stats[rel_dir]['runs']  += 1
         group_stats[rel_dir]['time']  += exec_time
 
-    # ── Overall_Evaluation.txt: tổng kết theo từng bộ ─────────────────────
+        # Lưu Overall của bộ hiện tại ngay sau mỗi file (để check khi đang chạy)
+        grp_eval = os.path.join(RESULT_DIR, rel_dir, "Overall_Evaluation.txt")
+        stat = group_stats[rel_dir]
+        avg  = stat['time'] / stat['runs'] if stat['runs'] else 0
+        with open(grp_eval, 'w', encoding='utf-8') as gf:
+            gf.write(f"Bộ dataset: {rel_dir}\n")
+            gf.write(f"Số bài đã giải: {stat['runs']}\n")
+            gf.write(f"Thời gian trung bình: {avg:.6f} giây\n")
+
+        # Lưu Overall toàn bộ (cập nhật sau mỗi file)
+        _overall = os.path.join(RESULT_DIR, "Overall_Evaluation.txt")
+        with open(_overall, 'w', encoding='utf-8') as _f:
+            _f.write(f"Thuật toán: {SOLVER_NAME}\n")
+            _f.write(f"Tổng file đã giải: {runs}\n")
+            _f.write(f"Thời gian trung bình toàn bộ: "
+                     f"{total_time / runs:.6f} giây\n\n")
+            _f.write(f"{'Bộ dataset':<25} {'Số file':>8} {'TB (giây)':>12}\n")
+            _f.write("-" * 48 + "\n")
+            for grp, st in sorted(group_stats.items()):
+                _avg = st['time'] / st['runs'] if st['runs'] else 0
+                _f.write(f"{grp:<25} {st['runs']:>8} {_avg:>12.4f}\n")
+
+    # ── Overall đã được lưu incremental sau mỗi file ─────────────────────
+    # Ghi lần cuối để đảm bảo số liệu chính xác hoàn toàn
     overall_file = os.path.join(RESULT_DIR, "Overall_Evaluation.txt")
     with open(overall_file, 'w', encoding='utf-8') as f:
         f.write(f"Thuật toán: {SOLVER_NAME}\n")
@@ -648,14 +687,13 @@ def main():
         for grp, stat in sorted(group_stats.items()):
             avg = stat['time'] / stat['runs'] if stat['runs'] else 0
             f.write(f"{grp:<25} {stat['runs']:>8} {avg:>12.4f}\n")
-        # Overall_Evaluation riêng cho từng bộ
-        for grp, stat in group_stats.items():
-            grp_file = os.path.join(RESULT_DIR, grp, "Overall_Evaluation.txt")
-            avg = stat['time'] / stat['runs'] if stat['runs'] else 0
-            with open(grp_file, 'w', encoding='utf-8') as gf:
-                gf.write(f"Bộ dataset: {grp}\n")
-                gf.write(f"Số bài giải: {stat['runs']}\n")
-                gf.write(f"Thời gian trung bình: {avg:.6f} giây\n")
+    for grp, stat in group_stats.items():
+        grp_file = os.path.join(RESULT_DIR, grp, "Overall_Evaluation.txt")
+        avg = stat['time'] / stat['runs'] if stat['runs'] else 0
+        with open(grp_file, 'w', encoding='utf-8') as gf:
+            gf.write(f"Bộ dataset: {grp}\n")
+            gf.write(f"Số bài giải: {stat['runs']}\n")
+            gf.write(f"Thời gian trung bình: {avg:.6f} giây\n")
 
     print(f"\n{'='*55}")
     print(f"Hoàn thành! {runs} file | TB: {total_time/runs if runs else 0:.2f}s/bài")
