@@ -477,7 +477,26 @@ LS_ITERS      = 20
 MUTATION_RATE = 0.25
 TOURNAMENT_K  = 3
 SEED          = 42
-TIME_LIMIT    = None   # giây/bài, None = không giới hạn
+
+# Giới hạn thời gian theo số lớp-môn (giây/file)
+# Tra theo tổng lớp-môn của file, lấy ngưỡng nhỏ nhất >= total_cc
+# None ở cuối = fallback không giới hạn
+TIME_LIMIT_BY_SIZE = [
+    (500,    60),    # <= 500  lớp-môn : 60s
+    (2000,   120),   # <= 2000 lớp-môn : 2 phút
+    (5000,   300),   # <= 5000 lớp-môn : 5 phút
+    (10000,  480),   # <= 10000         : 8 phút
+    (float('inf'), 600),  # > 10000     : 10 phút
+]
+
+def get_time_limit(total_cc):
+    for threshold, limit in TIME_LIMIT_BY_SIZE:
+        if total_cc <= threshold:
+            return limit
+    return 600
+
+# Chỉ chạy các subfolder trong danh sách này (None = chạy tất cả)
+SUBFOLDERS = None   # vd: ["Adversarial", "Exponential"] để tách notebook
 
 
 # ─── Ghi kết quả ─────────────────────────────────────────────────────────────
@@ -543,6 +562,9 @@ def main():
     all_files = []   # list of (subfolder_relative, filepath)
     for root, dirs, files in os.walk(INPUT_DIR):
         dirs.sort()  # duyệt subfolder theo thứ tự alphabet
+        # Lọc subfolder nếu SUBFOLDERS được chỉ định
+        if root == INPUT_DIR and SUBFOLDERS is not None:
+            dirs[:] = [d for d in dirs if d in SUBFOLDERS]
         txts = sorted([f for f in files if f.endswith(".txt")], key=sort_key)
         for fname in txts:
             rel_dir  = os.path.relpath(root, INPUT_DIR)   # vd: "Adversarial"
@@ -583,14 +605,15 @@ def main():
 
         T, N, M, class_courses, teacher_courses, durations = parse_input(text)
         total_cc = sum(len(c) for c in class_courses)
-        print(f"  Đang giải {basename} ({total_cc} lớp-môn)...", flush=True)
+        tl = get_time_limit(total_cc)
+        print(f"  Đang giải {basename} ({total_cc} lớp-môn | limit={tl}s)...", flush=True)
 
         start  = time.perf_counter()
         solver = MemeticSolver(
             T, N, M, class_courses, teacher_courses, durations,
             pop_size=POP_SIZE, generations=GENERATIONS, ls_iters=LS_ITERS,
             mutation_rate=MUTATION_RATE, tournament_k=TOURNAMENT_K,
-            seed=SEED, time_limit=TIME_LIMIT, verbose=False,
+            seed=SEED, time_limit=tl, verbose=False,
         )
         best, _ = solver.solve()
         exec_time = time.perf_counter() - start
