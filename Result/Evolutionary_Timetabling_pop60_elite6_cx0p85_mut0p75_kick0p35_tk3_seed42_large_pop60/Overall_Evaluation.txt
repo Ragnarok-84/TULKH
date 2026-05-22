@@ -1,0 +1,12 @@
+Thuật toán: Evolutionary_Timetabling
+Tổng file: 60
+Thời gian TB: 334.405310 giây
+
+Bộ dataset                 Files          Obj/Total     Greedy   Better    Equal    Worse  Invalid    AvgTime
+-------------------------------------------------------------------------------------------------------------------
+Adversarial                   10    42237/47899         42180        7        3        0        0     395.12
+Exponential                   10    43802/47900         43739        7        3        0        0     395.09
+Gaussian                      10    47206/47899         46970        9        1        0        0     395.29
+Poisson                       10    46852/47899         46703        8        2        0        0     395.18
+Uniform                       10    46587/47899         46259        8        2        0        0     395.30
+hustack                       10     1631/1903           1629        2        8        0        0      30.44

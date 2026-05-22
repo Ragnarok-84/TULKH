@@ -1,0 +1,14 @@
+crossover_rate: 0.85
+elite: 5
+filepath: None
+input_dir: Datasets
+local_kick_rate: 0.55
+mutation_rate: 0.75
+pop_size: 40
+result_root: Result
+seed: 42
+solver_name: Evolutionary_Timetabling
+subfolders: Adversarial,Exponential,Gaussian,hustack,Poisson,Uniform
+tag: high_kick_0p55
+time_limit: None
+tournament_k: 3

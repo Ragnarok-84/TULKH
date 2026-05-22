@@ -1,0 +1,14 @@
+crossover_rate: 0.85
+elite: 5
+filepath: None
+input_dir: Datasets
+local_kick_rate: 0.35
+mutation_rate: 0.4
+pop_size: 40
+result_root: Result
+seed: 42
+solver_name: Evolutionary_Timetabling
+subfolders: Adversarial,Exponential,Gaussian,hustack,Poisson,Uniform
+tag: low_mutation_0p4
+time_limit: None
+tournament_k: 3
